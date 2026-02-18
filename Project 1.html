@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="fa">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Infinite Runner – 2.5D+</title>
+<style>
+  :root{
+    --bg:#0f1113;
+    --panel:#141617;
+    --muted:#9aa0a6;
+    --accent:#ffd24a;
+    --glass-alpha:0.12;
+    --popup-radius:14px;
+    --popup-padding:24px 28px;
+  }
+
+  html,body{margin:0;padding:0;height:100%;background:var(--bg);color:#fff;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial;overflow:hidden}
+
+  /* FX canvas (visual layer) — MUST be above game canvas */
+  #fx{
+    position:fixed;
+    inset:0;
+    z-index:3;            /* <-- was behind before; now above game canvas */
+    pointer-events:none;
+  }
+  /* main game canvas below FX but above background */
+  #game{
+    display:block;
+    position:relative;
+    z-index:2;
+    background:transparent;
+  }
+
+  #ui{
+    position:absolute; bottom:20px; left:50%; transform:translateX(-50%);
+    width:340px; text-align:center; color:#fff; z-index:5;
+  }
+  #score{font-size:28px;font-weight:700;letter-spacing:0.6px}
+  #highScore{position:absolute; top:12px; right:16px; font-size:14px; color:var(--accent); z-index:5; font-weight:600}
+  #hint{font-size:13px;color:var(--muted);margin-top:6px}
+
+  /* POPUP — modern minimal glass-style */
+  .popupOverlay{
+    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:rgba(0,0,0,0.45); z-index:50; pointer-events:auto;
+  }
+  .popupBox{
+    width:min(94vw,480px);
+    background: linear-gradient(180deg, rgba(255,255,255,var(--glass-alpha)), rgba(255,255,255,var(--glass-alpha*0.6)));
+    backdrop-filter: blur(8px) saturate(100%);
+    -webkit-backdrop-filter: blur(8px) saturate(100%);
+    border: 1px solid rgba(255,255,255,0.06);
+    padding: var(--popup-padding);
+    border-radius: var(--popup-radius);
+    box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+    text-align:center; color:#fff;
+    transform:translateY(0); animation:pop .22s cubic-bezier(.2,.9,.2,1);
+  }
+  .popupBox h2{
+    margin:0 0 10px 0; font-size:20px; font-weight:700; color:#fff;
+    letter-spacing:0.4px;
+  }
+  .popupBox p{margin:0 0 14px 0; color:var(--muted); font-size:13px}
+
+  /* Minimal buttons */
+  .btn{
+    appearance:none; border:none; padding:10px 18px; border-radius:10px;
+    background:transparent; color:#000; font-weight:700; cursor:pointer; font-size:15px;
+    display:inline-flex; align-items:center; gap:10px;
+  }
+  .btn.primary{
+    background:linear-gradient(180deg,var(--accent), #ffb800);
+    color:#111; border-radius:10px; padding:10px 20px; box-shadow:0 6px 18px rgba(0,0,0,0.35);
+  }
+  .btn.ghost{
+    background:transparent; color:var(--muted);
+    border:1px solid rgba(255,255,255,0.04); padding:9px 16px;
+  }
+  .btn:active{transform:translateY(1px); opacity:0.98}
+  @keyframes pop{from{transform:scale(.96);opacity:0}to{transform:scale(1);opacity:1}}
+
+  /* ensure popups receive pointer events */
+  #startPopup, #gameOverPopup{pointer-events:auto}
+</style>
+</head>
+<body>
+<!-- FX canvas (visual-only layer, clipped to top 2/3 in JS) -->
+<canvas id="fx"></canvas>
+
+<!-- Main game canvas -->
+<canvas id="game"></canvas>
+
+<div id="highScore">High: 0</div>
+
+<div id="ui">
+  <div id="score">Score: 0</div>
+  <div id="hint">♠︎made by highenoughtodrown@gmail.com
+                           
+</div>
+</div>
+
+<!-- START POPUP -->
+<div id="startPopup" class="popupOverlay">
+  <div class="popupBox" role="dialog" aria-modal="true" aria-label="Start menu">
+    <h2>Infinite Runner</h2>
+    <p style="margin-bottom:18px">Tap repeatedly to go up, ready?</p>
+    <button id="startBtn" class="btn primary" aria-label="Start game">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden style="display:block"><path d="M5 3v18l15-9L5 3z" fill="#111"/></svg>
+      START
+    </button>
+  </div>
+</div>
+
+<!-- GAME OVER POPUP (close removed as requested) -->
+<div id="gameOverPopup" class="popupOverlay" style="display:none;">
+  <div class="popupBox" role="dialog" aria-modal="true" aria-label="Game over">
+    <h2 id="insultText" style="min-height:48px; color:#fff; font-size:18px; font-weight:700"></h2>
+    <p style="color:var(--muted); margin-top:8px"></p>
+    <div style="display:flex; gap:10px; justify-content:center; margin-top:12px;">
+      <button id="restartBtn" class="btn primary">RESTART</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ---------- FX + Game (only visuals affected as requested) ---------- */
+
+/* -------- FX canvas setup -------- */
+const fx = document.getElementById('fx');
+const fxCtx = fx.getContext('2d');
+
+/* -------- Game canvas setup -------- */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function fitSizes(){
+  canvas.width = innerWidth;
+  canvas.height = innerHeight;
+  fx.width = innerWidth;
+  fx.height = innerHeight;
+}
+fitSizes();
+window.addEventListener('resize', fitSizes);
+
+/* ---------- Performance detection (mobile/low-power) ---------- */
+function detectLowPerf(){
+  try {
+    const isSmallScreen = innerWidth < 900;
+    const lowMem = navigator.deviceMemory && navigator.deviceMemory <= 2;
+    const fewCores = navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 2;
+    return isSmallScreen || lowMem || fewCores;
+  } catch(e){ return innerWidth < 900; }
+}
+let useLowPerf = detectLowPerf();
+
+/* -------- Game variables (unchanged logic) -------- */
+const scoreEl = document.getElementById('score');
+const highEl = document.getElementById('highScore');
+
+let score = 0;
+let highScore = Number(localStorage.getItem('highScore') || 0);
+highEl.textContent = "High: " + highScore;
+
+let gameRunning = false;
+
+const startPopup = document.getElementById('startPopup');
+const gameOverPopup = document.getElementById('gameOverPopup');
+const insultText = document.getElementById('insultText');
+
+const insults = [
+  "You absolute disaster",
+  "Even gravity is embarrassed",
+  "That was painfully bad",
+  "Did you try losing?",
+  "My grandma jumps better",
+  "Skill issue detected",
+  "Embarrassing performance",
+  "You call that reflexes?",
+  "NPC energy",
+  "Tragic gameplay",
+  "Controller unplugged?",
+  "That was sad",
+  "Please uninstall",
+  "Even bots laugh at this",
+  "That jump was illegal",
+  "Try using your eyes",
+  "Low IQ move",
+  "Hopeless",
+  "Are you lagging or just bad?",
+  "That hurt to watch",
+  "Clown performance",
+  "You panic too much",
+  "Reflexes of a potato",
+  "Try again, maybe with brain on",
+  "Achievement unlocked: Failure",
+  "Skill issue.",
+  "you play like a femboy.",
+  "Your gameplay is buffering.",
+  "You play like a femboy.",
+  "Average tutorial skipper.",
+  "Even the obstacles are confused.",
+  "This run belongs in a compilation.",
+  "Gravity called. It wants a refund.",
+  "NPC behavior detected.",
+  "Spectacularly unimpressive.",
+  "Keyboard? Controller? Same result.",
+  "This run needs a patch.",
+  "The obstacles feel second-hand embarrassment.",
+  "Achievement unlocked: panic.",
+  "You’re speedrunning the Game Over screen.", 
+"HAHAHA YOU'RE TRASH",
+  "FAT ASS LOSER",
+  "MF — GET BETTER",
+  "YOU'RE A JOKE",
+  "GO BACK TO TUTORIAL, CHUMP",
+  "EMBARRASSING PERFORMANCE",
+  "I'VE SEEN ROCKS DO BETTER",
+  "F**KING PATHETIC, TRY AGAIN",
+  "LOL, ZERO SKILL",
+  "YOU'RE A SORRY EXCUSE",
+  "BRING A BRAIN NEXT TIME",
+  "YOU MADE GRAVITY LOOK BAD",
+  "STOP TAP-DANCING AND JUMP",
+  "YOU'RE A HUMAN SPEED BUMP",
+  "CONGRATS, YOU FAILED SPECTACULARLY",
+  "SERIOUSLY? THAT WAS YOUR BEST?",
+  "GET GOOD, OR GET OFF MY SCREEN",
+  "NOOB ALERT — TRY AGAIN",
+  "YOU'RE BASICALLY FREE POINTS FOR OTHERS",
+  "UNINSTALLED — IN SPIRIT",
+  "YOUR TAPGAME IS PATHETIC",
+  "LOL — TRASH RUN",
+  "YOU'VE GOT THE TOUCH... TO LOSE",
+  "SAD TAP, SAD LIFE",
+  "TRY AGAIN, MAYBE SOMEDAY",
+  "BRUH, EMBARRASS ME MORE",
+  "YOUR SKILLS BELONG IN A MUSEUM — OF FAILURES",
+  "PLAYING LIKE YOU'VE GOT LAGS IN YOUR BRAIN",
+  "OH COOL, YOU'RE SINGLE-HANDEDLY LOWERING THE HIGH SCORE"
+];
+
+const groundY = () => canvas.height * 0.66;
+const jumpTop = 50;
+
+const player = { x:50, w:50, h:50, y:0, vy:0, jumping:false, hue:0 };
+function resetPlayerPosition(){ player.y = groundY() - player.h; player.vy = 0; player.jumping = false; }
+
+let baseSpeed = 6;
+let maxSpeed = 18;
+let speed = baseSpeed;
+
+let obstacles = [];
+let particles = [];
+
+/* ---------- Visual config that adapts to performance ---------- */
+let FX_LINE_COUNT = useLowPerf ? 8 : 14;
+const FX_MIN_ALPHA = useLowPerf ? 0.03 : 0.04;
+const FX_MAX_ALPHA = useLowPerf ? 0.08 : 0.11;
+const FX_MIN_SPEED = useLowPerf ? 0.15 : 0.2;
+const FX_MAX_SPEED = useLowPerf ? 0.45 : 0.6;
+const FX_MIN_W = useLowPerf ? 80 : 100;
+const FX_MAX_W = useLowPerf ? 160 : 260;
+const FX_THICKNESS = useLowPerf ? 1.4 : 2;
+
+const MAX_PARTICLES = useLowPerf ? 20 : 60;
+
+/* shapes unchanged */
+const shapes = ["square","circle","triangle","hex","diamond","star","pentagon","cross","oval","semicircle","plus"];
+
+/* Input: pointer on canvas + keyboard */
+let jumpPressed = false;
+window.addEventListener('keydown', e => { if(e.code === "Space"){ e.preventDefault(); jumpPressed = true; }});
+window.addEventListener('keyup', e => { if(e.code === "Space"){ jumpPressed = false; }});
+canvas.addEventListener('pointerdown', e => { jumpPressed = true; });
+canvas.addEventListener('pointerup', e => { jumpPressed = false; });
+canvas.addEventListener('pointercancel', e => { jumpPressed = false; });
+
+/* ---------- Slightly brighter obstacle color generation (visual only) ---------- */
+function spawnObstacle(extraY=null){
+  const size = 25 + Math.random()*45;
+  const y = extraY ?? (jumpTop + Math.random()*(groundY()-size-jumpTop));
+  const hue = Math.floor(Math.random()*360);
+  const sat = Math.floor(60 + Math.random()*30); // 60-90%
+  const light = Math.floor(52 + Math.random()*20); // 52-72%
+  const color = `hsl(${hue},${sat}%,${light}%)`;
+  obstacles.push({
+    x: canvas.width,
+    y, w:size, h:size,
+    shape: shapes[Math.random()*shapes.length|0],
+    color
+  });
+}
+
+function spawnParticle(){
+  if(particles.length >= MAX_PARTICLES) return; // cap to avoid piling up on weak devices
+  particles.push({
+    x: player.x + player.w/2,
+    y: player.y + player.h,
+    vx: -2 - Math.random()*2,
+    vy: (Math.random()-0.5)*0.6,
+    size: 1 + Math.random()*2,
+    life: 25,
+    color: `hsl(${Math.random()*360},80%,60%)`
+  });
+}
+
+/* drawing helpers (unchanged visual geometry) */
+function roundRect(ctx, x, y, w, h, r) {
+  const min = Math.min(w,h)/2;
+  if(r > min) r = min;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+/* drawObstacle (unchanged shapes but brighter gradient) */
+function drawObstacle(o){
+  ctx.save();
+  // reduce heavy shadow blur on low-power devices
+  const blur = useLowPerf ? Math.max(0, Math.min(8, o.w * 0.06)) : Math.max(6, Math.min(18, o.w * 0.12));
+  ctx.shadowColor = 'rgba(0,0,0,0.45)';
+  ctx.shadowBlur = blur;
+  ctx.shadowOffsetY = 3;
+
+  const g = ctx.createLinearGradient(o.x, o.y, o.x + o.w, o.y + o.h);
+  const baseH = getHueFromHsl(o.color) || (Math.random()*360|0);
+  g.addColorStop(0, `hsl(${baseH},60%,70%)`);
+  g.addColorStop(1, `hsl(${baseH},55%,58%)`);
+  ctx.fillStyle = g;
+
+  if(o.shape === "circle"){
+    const cx = o.x + o.w/2, cy = o.y + o.h/2, r = o.w/2;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.fill();
+  }
+  else if(o.shape === "oval"){
+    ctx.beginPath();
+    ctx.ellipse(o.x + o.w/2, o.y + o.h/2, o.w/2, o.h/2 * 0.75, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+  else if(o.shape === "diamond"){
+    const cx = o.x + o.w/2, cy = o.y + o.h/2;
+    ctx.beginPath();
+    ctx.moveTo(cx, o.y);
+    ctx.lineTo(o.x + o.w, cy);
+    ctx.lineTo(cx, o.y + o.h);
+    ctx.lineTo(o.x, cy);
+    ctx.closePath(); ctx.fill();
+  }
+  else if(o.shape === "triangle"){
+    const cx = o.x + o.w/2;
+    ctx.beginPath();
+    ctx.moveTo(cx, o.y + 2);
+    ctx.lineTo(o.x + o.w - 2, o.y + o.h - 2);
+    ctx.lineTo(o.x + 2, o.y + o.h - 2);
+    ctx.closePath(); ctx.fill();
+  }
+  else if(o.shape === "hex"){
+    const cx = o.x + o.w/2, cy = o.y + o.h/2, r = Math.min(o.w,o.h)/2;
+    ctx.beginPath();
+    for(let i=0;i<6;i++){
+      const a = Math.PI/3 * i - Math.PI/6;
+      const x = cx + Math.cos(a) * r;
+      const y = cy + Math.sin(a) * r;
+      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    ctx.closePath(); ctx.fill();
+  }
+  else if(o.shape === "star"){
+    const cx = o.x + o.w/2, cy = o.y + o.h/2, r = Math.min(o.w,o.h)/2;
+    ctx.beginPath();
+    for(let i=0;i<5;i++){
+      const a = i * (Math.PI*2)/5 - Math.PI/2;
+      const ax = cx + Math.cos(a) * r;
+      const ay = cy + Math.sin(a) * r;
+      ctx.lineTo(ax, ay);
+      const a2 = a + Math.PI/5;
+      const bx = cx + Math.cos(a2) * (r*0.5);
+      const by = cy + Math.sin(a2) * (r*0.5);
+      ctx.lineTo(bx, by);
+    }
+    ctx.closePath(); ctx.fill();
+  }
+  else if(o.shape === "semicircle"){
+    const cx = o.x + o.w/2, cy = o.y + o.h/2;
+    ctx.beginPath();
+    ctx.arc(cx, o.y + o.h, o.w/2, Math.PI, 0);
+    ctx.lineTo(o.x + o.w, o.y + o.h);
+    ctx.lineTo(o.x, o.y + o.h);
+    ctx.closePath(); ctx.fill();
+  }
+  else if(o.shape === "plus"){
+    const w = o.w, h = o.h;
+    const cx = o.x + w/2, cy = o.y + h/2;
+    const s = Math.min(w,h) * 0.25;
+    roundRect(ctx, cx - s/2, o.y + h*0.15, s, h*0.7, s*0.2);
+    ctx.fill();
+    roundRect(ctx, o.x + w*0.15, cy - s/2, w*0.7, s, s*0.2);
+    ctx.fill();
+  }
+  else {
+    roundRect(ctx, o.x, o.y, o.w, o.h, Math.max(6, o.w*0.12));
+    ctx.fill();
+  }
+
+  ctx.lineWidth = Math.max(1, o.w * 0.04);
+  ctx.strokeStyle = `rgba(0,0,0,0.35)`;
+  ctx.stroke();
+
+  // subtle highlight (kept but inexpensive)
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  roundRect(ctx, o.x, o.y, o.w, o.h * 0.45, Math.max(6, o.w*0.12));
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function getHueFromHsl(hsl){
+  if(!hsl || typeof hsl !== 'string') return null;
+  const m = hsl.match(/hsl\((\d+(?:\.\d+)?)/);
+  return m ? Number(m[1]) : null;
+}
+
+/* ---------- Player drawing (visual stronger glow) ---------- */
+function drawPlayer(){
+  const distFromGround = Math.max(0, groundY() - (player.y + player.h));
+  const t = Math.min(distFromGround / 200, 1);
+  const shadowScale = 1 - t * 0.6;
+  const shadowAlpha = 0.35 * (1 - t);
+  ctx.fillStyle = `rgba(0,0,0,${shadowAlpha})`;
+  ctx.beginPath();
+  ctx.ellipse(player.x + player.w/2, groundY() + 8, player.w * 0.45 * shadowScale, 8 * shadowScale, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  ctx.save();
+  ctx.translate(player.x + player.w/2, player.y + player.h/2);
+  ctx.rotate(player.vy * 0.015);
+  ctx.translate(-player.w/2, -player.h/2);
+
+  player.hue = (player.hue + 2) % 360;
+  const baseColor = `hsl(${player.hue},98%,62%)`;
+
+  // glow: thin colored halo (reduced blur on low-perf)
+  ctx.shadowColor = `hsla(${player.hue},98%,62%,0.9)`;
+  ctx.shadowBlur = useLowPerf ? 8 : 16;
+  const g = ctx.createLinearGradient(0,0,0,player.h);
+  g.addColorStop(0,"rgba(255,255,255,0.42)");
+  g.addColorStop(0.4, baseColor);
+  g.addColorStop(1,"rgba(0,0,0,0.5)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,player.w,player.h);
+
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  ctx.fillRect(player.w-6,0,6,player.h);
+  ctx.fillRect(0,player.h-6,player.w,6);
+
+  const shine = ctx.createLinearGradient(0,0,player.w,0);
+  shine.addColorStop(0,"rgba(255,255,255,0.35)");
+  shine.addColorStop(0.5,"rgba(255,255,255,0)");
+  shine.addColorStop(1,"rgba(0,0,0,0.25)");
+  ctx.fillStyle = shine;
+  ctx.fillRect(0,0,player.w,player.h);
+
+  ctx.restore();
+}
+
+/* ---------- FX implementation (now actually visible) ---------- */
+let fxLines = [];
+
+function initFX(){
+  FX_LINE_COUNT = useLowPerf ? 8 : 14;
+  fxLines = Array.from({length: FX_LINE_COUNT}, () => ({
+    x: Math.random() * fx.width,
+    y: Math.random() * fx.height * 0.66,
+    w: FX_MIN_W + Math.random() * (FX_MAX_W - FX_MIN_W),
+    speed: FX_MIN_SPEED + Math.random() * (FX_MAX_SPEED - FX_MIN_SPEED),
+    alpha: FX_MIN_ALPHA + Math.random() * (FX_MAX_ALPHA - FX_MIN_ALPHA),
+    tint: (220 + Math.random()*40)|0          // slightly cool tint (220-260 hue)
+  }));
+}
+initFX();
+
+/* draw step only (no scheduling here) */
+function drawFXStep(){
+  fxCtx.clearRect(0,0,fx.width,fx.height);
+
+  // clip to top 2/3
+  fxCtx.save();
+  fxCtx.beginPath();
+  fxCtx.rect(0,0,fx.width,fx.height * 0.66);
+  fxCtx.clip();
+
+  fxCtx.globalCompositeOperation = 'lighter';
+
+  for(const l of fxLines){
+    l.x -= l.speed;
+    if(l.x + l.w < -50){
+      l.x = fx.width + Math.random()*200;
+      l.y = Math.random() * fx.height * 0.66;
+    }
+
+    const g = fxCtx.createLinearGradient(l.x,0,l.x+l.w,0);
+    // subtle tinted gradient (use tint hue to avoid pure white)
+    g.addColorStop(0, `rgba(180,200,255,0)`);
+    g.addColorStop(0.5, `hsla(${l.tint},85%,85%,${l.alpha})`);
+    g.addColorStop(1, `rgba(180,200,255,0)`);
+
+    fxCtx.fillStyle = g;
+    fxCtx.fillRect(l.x, l.y, l.w, FX_THICKNESS);
+
+    // soft duplicated thin stroke for a faint glow (gives perceptual blur)
+    fxCtx.fillStyle = `hsla(${l.tint},85%,75%,${l.alpha*0.35})`;
+    fxCtx.fillRect(l.x+1, l.y+0.9, l.w-2, FX_THICKNESS*0.65);
+  }
+
+  fxCtx.restore();
+}
+
+/* FX loop controller: rAF on desktop, interval on low-perf devices */
+let fxRAF = null;
+let fxTimer = null;
+
+function startFXLoop(){
+  // clear existing
+  if(fxRAF){ cancelAnimationFrame(fxRAF); fxRAF = null; }
+  if(fxTimer){ clearInterval(fxTimer); fxTimer = null; }
+
+  if(useLowPerf){
+    // ~30 FPS stable interval for weak devices
+    fxTimer = setInterval(() => {
+      drawFXStep();
+    }, 1000/30);
+  } else {
+    (function fxLoop(){
+      drawFXStep();
+      fxRAF = requestAnimationFrame(fxLoop);
+    })();
+  }
+}
+startFXLoop();
+
+/* ensure FX re-init on resize and when performance detection changes */
+window.addEventListener('resize', () => {
+  const newLow = detectLowPerf();
+  if(newLow !== useLowPerf){
+    useLowPerf = newLow;
+    // update limits
+    initFX();
+    startFXLoop();
+  } else {
+    initFX();
+  }
+});
+
+/* ---------- Game loop (unchanged logic) ---------- */
+function loop(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // top 2/3 black background
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, Math.floor(canvas.height * (2/3)));
+
+  // ground (lower area)
+  ctx.fillStyle = "#26292b";
+  ctx.fillRect(0, groundY(), canvas.width, canvas.height - groundY());
+
+  if(gameRunning){
+    if(jumpPressed && !player.jumping){
+      player.vy = -14;
+      player.jumping = true;
+    }
+    if(player.jumping && (!jumpPressed || player.y <= jumpTop)) player.jumping = false;
+
+    player.vy += 0.8;
+    player.y += player.vy;
+
+    if(player.y > groundY() - player.h){
+      player.y = groundY() - player.h;
+      player.vy = 0;
+      for(let i=0;i<3;i++) spawnParticle();
+    }
+    if(player.y < jumpTop){ player.y = jumpTop; player.vy = 0; }
+
+    drawPlayer();
+
+    for(let i=particles.length-1;i>=0;i--){
+      const p = particles[i];
+      p.x += p.vx; p.y += p.vy; p.life--;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x, p.y, p.size, p.size);
+      if(p.life<=0) particles.splice(i,1);
+    }
+
+    for(let i=obstacles.length-1;i>=0;i--){
+      const o = obstacles[i];
+      o.x -= speed;
+      drawObstacle(o);
+
+      if(player.x < o.x + o.w && player.x + player.w > o.x &&
+         player.y < o.y + o.h && player.y + player.h > o.y){
+
+        highScore = Math.max(score, highScore);
+        localStorage.setItem('highScore', highScore);
+        highEl.textContent = "High: " + highScore;
+
+        gameRunning = false;
+        insultText.textContent = insults[(Math.random()*insults.length)|0];
+        gameOverPopup.style.display = 'flex';
+      }
+
+      if(o.x + o.w < 0){
+        obstacles.splice(i,1);
+        score++;
+        scoreEl.textContent = "Score: " + score;
+        speed = Math.min(baseSpeed + score * 0.08, maxSpeed);
+        if(score % 5 === 0) spawnObstacle(player.y);
+      }
+    }
+  } else {
+    // render idle state
+    drawPlayer();
+    for(const o of obstacles) drawObstacle(o);
+  }
+
+  requestAnimationFrame(loop);
+}
+
+/* spawn interval (unchanged) */
+setInterval(()=>{
+  if(gameRunning){
+    spawnObstacle();
+    if(Math.random() < 0.25) spawnObstacle();
+  }
+}, 1200);
+
+/* Buttons (unchanged behavior) */
+const startBtn = document.getElementById('startBtn');
+const restartBtn = document.getElementById('restartBtn');
+
+function startGame(){
+  startPopup.style.display = 'none';
+  obstacles = [];
+  particles = [];
+  score = 0; scoreEl.textContent = "Score: 0";
+  speed = baseSpeed;
+  resetPlayerPosition();
+  gameRunning = true;
+  canvas.focus && canvas.focus();
+}
+function restartGame(){
+  gameOverPopup.style.display = 'none';
+  obstacles = [];
+  particles = [];
+  score = 0; scoreEl.textContent = "Score: 0";
+  speed = baseSpeed;
+  resetPlayerPosition();
+  gameRunning = true;
+  canvas.focus && canvas.focus();
+}
+
+startBtn.addEventListener('click', startGame);
+startBtn.addEventListener('pointerup', startGame);
+restartBtn.addEventListener('click', restartGame);
+restartBtn.addEventListener('pointerup', restartGame);
+
+/* initial setup */
+resetPlayerPosition();
+loop();
+</script>
+</body>
+</html>
